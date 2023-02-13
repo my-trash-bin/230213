@@ -1,65 +1,87 @@
-import NextAuth, { NextAuthOptions } from "next-auth"
-import GoogleProvider from "next-auth/providers/google"
-import FacebookProvider from "next-auth/providers/facebook"
-import GithubProvider from "next-auth/providers/github"
-import TwitterProvider from "next-auth/providers/twitter"
-import Auth0Provider from "next-auth/providers/auth0"
-// import AppleProvider from "next-auth/providers/apple"
-// import EmailProvider from "next-auth/providers/email"
+import { Prisma, PrismaClient } from "@prisma/client";
+import NextAuth, { NextAuthOptions } from "next-auth";
+import { Adapter } from "next-auth/adapters";
+import KakaoProvider from "next-auth/providers/kakao";
 
-// For more information on each option (and a full list of options) go to
-// https://next-auth.js.org/configuration/options
-export const authOptions: NextAuthOptions = {
-  // https://next-auth.js.org/configuration/providers/oauth
-  providers: [
-    /* EmailProvider({
-         server: process.env.EMAIL_SERVER,
-         from: process.env.EMAIL_FROM,
-       }),
-    // Temporarily removing the Apple provider from the demo site as the
-    // callback URL for it needs updating due to Vercel changing domains
+import prisma from "../../../prisma";
 
-    Providers.Apple({
-      clientId: process.env.APPLE_ID,
-      clientSecret: {
-        appleId: process.env.APPLE_ID,
-        teamId: process.env.APPLE_TEAM_ID,
-        privateKey: process.env.APPLE_PRIVATE_KEY,
-        keyId: process.env.APPLE_KEY_ID,
-      },
-    }),
-    */
-    FacebookProvider({
-      clientId: process.env.FACEBOOK_ID,
-      clientSecret: process.env.FACEBOOK_SECRET,
-    }),
-    GithubProvider({
-      clientId: process.env.GITHUB_ID,
-      clientSecret: process.env.GITHUB_SECRET,
-    }),
-    GoogleProvider({
-      clientId: process.env.GOOGLE_ID,
-      clientSecret: process.env.GOOGLE_SECRET,
-    }),
-    TwitterProvider({
-      clientId: process.env.TWITTER_ID,
-      clientSecret: process.env.TWITTER_SECRET,
-    }),
-    Auth0Provider({
-      clientId: process.env.AUTH0_ID,
-      clientSecret: process.env.AUTH0_SECRET,
-      issuer: process.env.AUTH0_ISSUER,
-    }),
-  ],
-  theme: {
-    colorScheme: "light",
-  },
-  callbacks: {
-    async jwt({ token }) {
-      token.userRole = "admin"
-      return token
+if (!process.env.KAKAO_CLIENT_ID || !process.env.KAKAO_CLIENT_SECRET)
+  throw new Error("required env variables not found");
+
+// copypasted from https://github.com/nextauthjs/next-auth/blob/main/packages/adapter-prisma/src/index.ts
+export function PrismaAdapter(p: PrismaClient): Adapter {
+  return {
+    createUser: (data) => p.user.create({ data }),
+    getUser: (id) => p.user.findUnique({ where: { id } }),
+    getUserByEmail: (email) => p.user.findUnique({ where: { email } }),
+    async getUserByAccount(provider_providerAccountId) {
+      const account = await p.account.findUnique({
+        where: { provider_providerAccountId },
+        select: { user: true },
+      });
+      return account?.user ?? null;
     },
-  },
+    updateUser: ({ id, ...data }) => p.user.update({ where: { id }, data }),
+    deleteUser: (id) => p.user.delete({ where: { id } }),
+    linkAccount: (data) =>
+      p.account.create({ data }) as unknown as AdapterAccount,
+    unlinkAccount: (provider_providerAccountId) =>
+      p.account.delete({
+        where: { provider_providerAccountId },
+      }) as unknown as AdapterAccount,
+    async getSessionAndUser(sessionToken) {
+      const userAndSession = await p.session.findUnique({
+        where: { sessionToken },
+        include: { user: true },
+      });
+      if (!userAndSession) return null;
+      const { user, ...session } = userAndSession;
+      return { user, session };
+    },
+    createSession: (data) => p.session.create({ data }),
+    updateSession: (data) =>
+      p.session.update({ where: { sessionToken: data.sessionToken }, data }),
+    deleteSession: (sessionToken) =>
+      p.session.delete({ where: { sessionToken } }),
+    async createVerificationToken(data) {
+      const verificationToken = await p.verificationToken.create({ data });
+      // @ts-expect-errors // MongoDB needs an ID, but we don't
+      if (verificationToken.id) delete verificationToken.id;
+      return verificationToken;
+    },
+    async useVerificationToken(identifier_token) {
+      try {
+        const verificationToken = await p.verificationToken.delete({
+          where: { identifier_token },
+        });
+        // @ts-expect-errors // MongoDB needs an ID, but we don't
+        if (verificationToken.id) delete verificationToken.id;
+        return verificationToken;
+      } catch (error) {
+        // If token already used/deleted, just return null
+        // https://www.prisma.io/docs/reference/api-reference/error-reference#p2025
+        if ((error as Prisma.PrismaClientKnownRequestError).code === "P2025")
+          return null;
+        throw error;
+      }
+    },
+  };
 }
 
-export default NextAuth(authOptions)
+export const authOptions: NextAuthOptions = {
+  adapter: PrismaAdapter(prisma),
+  providers: [
+    KakaoProvider({
+      clientId: process.env.KAKAO_CLIENT_ID,
+      clientSecret: process.env.KAKAO_CLIENT_SECRET,
+    }),
+  ],
+  callbacks: {
+    async jwt({ token }) {
+      token.userRole = "admin";
+      return token;
+    },
+  },
+};
+
+export default NextAuth(authOptions);
